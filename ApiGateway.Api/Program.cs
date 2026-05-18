@@ -1,9 +1,11 @@
 using System.Net.Http.Headers;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json.Nodes;
 using Atracciones.Grpc;
 using Atracciones.Shared.Extensions;
 using Grpc.Net.Client;
+using System.IdentityModel.Tokens.Jwt;
 
 AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
 
@@ -129,7 +131,13 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
     {
         using var channel = CreateGrpcChannel(configuration, "Reservas");
         var client = new ReservasGrpc.ReservasGrpcClient(channel);
-        var reply = await client.ListarAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
+        var clienteGuid = GetClienteGuidFromToken(context);
+        var reply = await client.ListarAsync(new ListarReservasRequest
+        {
+            ClienteGuid = clienteGuid is not null && !IsStaff(context)
+                ? clienteGuid.Value.ToString()
+                : string.Empty
+        }, cancellationToken: context.RequestAborted);
         return FromGrpc(reply);
     });
 
@@ -164,7 +172,7 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
         var body = await ReadBodyAsync(context);
         var reply = await client.CrearReseniaAsync(new JsonRequest
         {
-            Json = WithAtraccionGuid(body, guid)
+            Json = WithAtraccionGuidAndUsuario(body, guid, GetUsuarioActual(context))
         }, cancellationToken: context.RequestAborted);
         return FromGrpc(reply);
     });
@@ -233,7 +241,9 @@ static async Task<IResult> ListarAtraccionesGrpcAsync(HttpContext context, IConf
     {
         Nombre = context.Request.Query["nombre"].ToString(),
         DestinoGuid = context.Request.Query["destinoGuid"].ToString(),
-        CategoriaGuid = context.Request.Query["categoriaGuid"].ToString()
+        CategoriaGuid = context.Request.Query["categoriaGuid"].ToString(),
+        Page = int.TryParse(context.Request.Query["page"].ToString(), out var page) ? page : 0,
+        PageSize = int.TryParse(context.Request.Query["pageSize"].ToString(), out var pageSize) ? pageSize : 0
     }, cancellationToken: context.RequestAborted);
 
     return FromGrpc(reply);
@@ -276,11 +286,38 @@ static async Task<string> ReadBodyAsync(HttpContext context)
     return string.IsNullOrWhiteSpace(body) ? "{}" : body;
 }
 
-static string WithAtraccionGuid(string body, Guid atraccionGuid)
+static string WithAtraccionGuidAndUsuario(string body, Guid atraccionGuid, string usuarioCreacion)
 {
     var node = JsonNode.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body)?.AsObject() ?? new JsonObject();
     node["atraccionGuid"] = atraccionGuid.ToString();
+    node["usuarioCreacion"] = usuarioCreacion;
     return node.ToJsonString();
+}
+
+static string GetUsuarioActual(HttpContext context)
+{
+    if (context.User.Identity?.IsAuthenticated != true)
+        return "booking-public";
+
+    return context.User.FindFirstValue(JwtRegisteredClaimNames.Sub)
+        ?? context.User.FindFirstValue(ClaimTypes.NameIdentifier)
+        ?? context.User.FindFirstValue(JwtRegisteredClaimNames.UniqueName)
+        ?? context.User.Identity.Name
+        ?? "booking-authenticated";
+}
+
+static Guid? GetClienteGuidFromToken(HttpContext context)
+{
+    if (context.User.Identity?.IsAuthenticated != true)
+        return null;
+
+    var sub = context.User.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+    return Guid.TryParse(sub, out var guid) ? guid : null;
+}
+
+static bool IsStaff(HttpContext context)
+{
+    return context.User.IsInRole("ADMIN") || context.User.IsInRole("OPERADOR");
 }
 
 static (string BaseUrl, string Path)? ResolveTarget(IConfiguration configuration, string path)

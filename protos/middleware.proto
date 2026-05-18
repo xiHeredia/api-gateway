@@ -18,6 +18,8 @@ message AtraccionesListRequest {
   string nombre = 1;
   string destino_guid = 2;
   string categoria_guid = 3;
+  int32 page = 4;
+  int32 page_size = 5;
 }
 
 message HorariosAtraccionRequest {
@@ -33,6 +35,10 @@ message HorarioTicketsRequest {
 message JsonReply {
   int32 status_code = 1;
   string json = 2;
+}
+
+message ListarReservasRequest {
+  string cliente_guid = 1;
 }
 
 service IdentidadGrpc {
@@ -58,7 +64,7 @@ service AtraccionesGrpc {
 
 service ReservasGrpc {
   rpc Crear(JsonRequest) returns (JsonReply);
-  rpc Listar(EmptyRequest) returns (JsonReply);
+  rpc Listar(ListarReservasRequest) returns (JsonReply);
   rpc Obtener(GuidRequest) returns (JsonReply);
   rpc ConfirmarPago(GuidRequest) returns (JsonReply);
 }
