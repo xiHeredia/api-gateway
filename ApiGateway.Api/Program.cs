@@ -2,16 +2,22 @@ using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json.Nodes;
+using ApiGateway.Api.Swagger;
 using Atracciones.Grpc;
 using Atracciones.Shared.Extensions;
 using Grpc.Net.Client;
 using System.IdentityModel.Tokens.Jwt;
+using Swashbuckle.AspNetCore.SwaggerGen;
 
 AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddAtraccionesApiDefaults(builder.Configuration, "api-gateway");
+builder.Services.Configure<SwaggerGenOptions>(options =>
+{
+    options.DocumentFilter<BookingPublicSwaggerDocumentFilter>();
+});
 
 builder.Services.AddHttpClient("proxy", client =>
 {
