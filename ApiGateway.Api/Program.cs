@@ -309,7 +309,8 @@ static (string BaseUrl, string Path)? ResolveTarget(IConfiguration configuration
     if (string.IsNullOrWhiteSpace(serviceKey))
         return null;
 
-    var baseUrl = configuration[$"ServiceUrls:{serviceKey}"];
+    var baseUrl = configuration[$"ServiceUrls:{serviceKey}"]
+        ?? configuration[$"GrpcServiceUrls:{serviceKey}"];
     if (string.IsNullOrWhiteSpace(baseUrl))
         return null;
 
@@ -318,8 +319,27 @@ static (string BaseUrl, string Path)? ResolveTarget(IConfiguration configuration
 
 static Uri BuildTargetUri(HttpContext context, string baseUrl, string forwardedPath)
 {
+    var normalizedBaseUrl = NormalizeServiceBaseUrl(baseUrl);
+    var normalizedPath = forwardedPath.Trim('/');
     var query = context.Request.QueryString.HasValue ? context.Request.QueryString.Value : string.Empty;
-    return new Uri($"{baseUrl}/api/v1/{forwardedPath}{query}");
+    return new Uri($"{normalizedBaseUrl}/api/v1/{normalizedPath}{query}");
+}
+
+static string NormalizeServiceBaseUrl(string baseUrl)
+{
+    var normalized = baseUrl.Trim().TrimEnd('/');
+    var suffixes = new[] { "/swagger/index.html", "/swagger", "/api/v1" };
+
+    foreach (var suffix in suffixes)
+    {
+        if (normalized.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[..^suffix.Length].TrimEnd('/');
+            break;
+        }
+    }
+
+    return normalized;
 }
 
 static void CopyRequestHeaders(HttpContext context, HttpRequestMessage request)
