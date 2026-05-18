@@ -10,10 +10,12 @@ AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddAtraccionesApiDefaults(builder.Configuration, "api-gateway");
+
 builder.Services.AddHttpClient("proxy", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(60);
 });
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("FrontendCors", policy =>
@@ -32,161 +34,165 @@ var app = builder.Build();
 
 app.UseAtraccionesApiDefaults();
 app.UseCors("FrontendCors");
+
 app.MapGet("/health", () => Results.Ok(new { status = "ok", service = "api-gateway" }));
 
-app.MapPost("/api/v1/auth/login", async (HttpContext context, IConfiguration configuration) =>
+if (app.Configuration.GetValue("Gateway:UseGrpc", true))
 {
-    using var channel = CreateGrpcChannel(configuration, "Identidad");
-    var client = new IdentidadGrpc.IdentidadGrpcClient(channel);
-    var reply = await client.LoginAsync(new JsonRequest { Json = await ReadBodyAsync(context) }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapPost("/api/v1/auth/register", async (HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Identidad");
-    var client = new IdentidadGrpc.IdentidadGrpcClient(channel);
-    var reply = await client.RegisterAsync(new JsonRequest { Json = await ReadBodyAsync(context) }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapGet("/api/v1/clientes/usuario/{usuarioGuid:guid}", async (Guid usuarioGuid, HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Clientes");
-    var client = new ClientesGrpc.ClientesGrpcClient(channel);
-    var reply = await client.ObtenerPorUsuarioGuidAsync(new GuidRequest { Guid = usuarioGuid.ToString() }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapGet("/api/v1/atracciones", ListarAtraccionesGrpcAsync);
-app.MapGet("/api/v1/booking/atracciones", ListarAtraccionesGrpcAsync);
-
-app.MapGet("/api/v1/atracciones/filtros", async (HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Atracciones");
-    var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-    var reply = await client.ObtenerFiltrosAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapGet("/api/v1/atracciones/{guid:guid}", ObtenerAtraccionGrpcAsync);
-app.MapGet("/api/v1/booking/atracciones/{guid:guid}", ObtenerAtraccionGrpcAsync);
-
-app.MapGet("/api/v1/atracciones/{guid:guid}/tickets", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Atracciones");
-    var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-    var reply = await client.ObtenerTicketsAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapGet("/api/v1/atracciones/{guid:guid}/horarios", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Atracciones");
-    var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-    var disponibles = bool.TryParse(context.Request.Query["disponibles"].ToString(), out var value) && value;
-    var reply = await client.ObtenerHorariosAtraccionAsync(new HorariosAtraccionRequest
+    app.MapPost("/api/v1/auth/login", async (HttpContext context, IConfiguration configuration) =>
     {
-        AtraccionGuid = guid.ToString(),
-        Disponibles = disponibles
-    }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
+        using var channel = CreateGrpcChannel(configuration, "Identidad");
+        var client = new IdentidadGrpc.IdentidadGrpcClient(channel);
+        var reply = await client.LoginAsync(new JsonRequest { Json = await ReadBodyAsync(context) }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
 
-app.MapGet("/api/v1/atracciones/{guid:guid}/horarios/{horarioId:guid}/tickets", async (
-    Guid guid,
-    Guid horarioId,
-    HttpContext context,
-    IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Atracciones");
-    var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-    var reply = await client.ObtenerTicketsPorHorarioAsync(new HorarioTicketsRequest
+    app.MapPost("/api/v1/auth/register", async (HttpContext context, IConfiguration configuration) =>
     {
-        AtraccionGuid = guid.ToString(),
-        HorarioGuid = horarioId.ToString()
-    }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
+        using var channel = CreateGrpcChannel(configuration, "Identidad");
+        var client = new IdentidadGrpc.IdentidadGrpcClient(channel);
+        var reply = await client.RegisterAsync(new JsonRequest { Json = await ReadBodyAsync(context) }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
 
-app.MapGet("/api/v1/tickets/{guid:guid}/horarios", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Atracciones");
-    var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-    var reply = await client.ObtenerHorariosPorTicketAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapPost("/api/v1/reservas", CrearReservaGrpcAsync);
-app.MapPost("/api/v1/booking/reservas", CrearReservaGrpcAsync);
-
-app.MapGet("/api/v1/reservas", async (HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Reservas");
-    var client = new ReservasGrpc.ReservasGrpcClient(channel);
-    var reply = await client.ListarAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapGet("/api/v1/reservas/{guid:guid}", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Reservas");
-    var client = new ReservasGrpc.ReservasGrpcClient(channel);
-    var reply = await client.ObtenerAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapPost("/api/v1/reservas/{guid:guid}/pagos/confirmacion", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Reservas");
-    var client = new ReservasGrpc.ReservasGrpcClient(channel);
-    var reply = await client.ConfirmarPagoAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapGet("/api/v1/atracciones/{guid:guid}/resenias", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Atracciones");
-    var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-    var reply = await client.ListarReseniasAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
-
-app.MapPost("/api/v1/atracciones/{guid:guid}/resenias", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Atracciones");
-    var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-    var body = await ReadBodyAsync(context);
-    var reply = await client.CrearReseniaAsync(new JsonRequest
+    app.MapGet("/api/v1/clientes/usuario/{usuarioGuid:guid}", async (Guid usuarioGuid, HttpContext context, IConfiguration configuration) =>
     {
-        Json = WithAtraccionGuid(body, guid)
-    }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
+        using var channel = CreateGrpcChannel(configuration, "Clientes");
+        var client = new ClientesGrpc.ClientesGrpcClient(channel);
+        var reply = await client.ObtenerPorUsuarioGuidAsync(new GuidRequest { Guid = usuarioGuid.ToString() }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
 
-app.MapPost("/api/v1/facturas", async (HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Facturacion");
-    var client = new FacturacionGrpc.FacturacionGrpcClient(channel);
-    var reply = await client.CrearFacturaAsync(new JsonRequest { Json = await ReadBodyAsync(context) }, cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
+    app.MapGet("/api/v1/atracciones", ListarAtraccionesGrpcAsync);
+    app.MapGet("/api/v1/booking/atracciones", ListarAtraccionesGrpcAsync);
 
-app.MapGet("/api/v1/facturas", async (HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Facturacion");
-    var client = new FacturacionGrpc.FacturacionGrpcClient(channel);
-    var reply = await client.ListarFacturasAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
+    app.MapGet("/api/v1/atracciones/filtros", async (HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Atracciones");
+        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
+        var reply = await client.ObtenerFiltrosAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
 
-app.MapGet("/api/v1/datos-facturacion", async (HttpContext context, IConfiguration configuration) =>
-{
-    using var channel = CreateGrpcChannel(configuration, "Facturacion");
-    var client = new FacturacionGrpc.FacturacionGrpcClient(channel);
-    var reply = await client.ListarDatosFacturacionAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
-    return FromGrpc(reply);
-});
+    app.MapGet("/api/v1/atracciones/{guid:guid}", ObtenerAtraccionGrpcAsync);
+    app.MapGet("/api/v1/booking/atracciones/{guid:guid}", ObtenerAtraccionGrpcAsync);
+
+    app.MapGet("/api/v1/atracciones/{guid:guid}/tickets", async (Guid guid, HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Atracciones");
+        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
+        var reply = await client.ObtenerTicketsAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapGet("/api/v1/atracciones/{guid:guid}/horarios", async (Guid guid, HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Atracciones");
+        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
+        var disponibles = bool.TryParse(context.Request.Query["disponibles"].ToString(), out var value) && value;
+        var reply = await client.ObtenerHorariosAtraccionAsync(new HorariosAtraccionRequest
+        {
+            AtraccionGuid = guid.ToString(),
+            Disponibles = disponibles
+        }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapGet("/api/v1/atracciones/{guid:guid}/horarios/{horarioId:guid}/tickets", async (
+        Guid guid,
+        Guid horarioId,
+        HttpContext context,
+        IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Atracciones");
+        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
+        var reply = await client.ObtenerTicketsPorHorarioAsync(new HorarioTicketsRequest
+        {
+            AtraccionGuid = guid.ToString(),
+            HorarioGuid = horarioId.ToString()
+        }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapGet("/api/v1/tickets/{guid:guid}/horarios", async (Guid guid, HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Atracciones");
+        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
+        var reply = await client.ObtenerHorariosPorTicketAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapPost("/api/v1/reservas", CrearReservaGrpcAsync);
+    app.MapPost("/api/v1/booking/reservas", CrearReservaGrpcAsync);
+
+    app.MapGet("/api/v1/reservas", async (HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Reservas");
+        var client = new ReservasGrpc.ReservasGrpcClient(channel);
+        var reply = await client.ListarAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapGet("/api/v1/reservas/{guid:guid}", async (Guid guid, HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Reservas");
+        var client = new ReservasGrpc.ReservasGrpcClient(channel);
+        var reply = await client.ObtenerAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapPost("/api/v1/reservas/{guid:guid}/pagos/confirmacion", async (Guid guid, HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Reservas");
+        var client = new ReservasGrpc.ReservasGrpcClient(channel);
+        var reply = await client.ConfirmarPagoAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapGet("/api/v1/atracciones/{guid:guid}/resenias", async (Guid guid, HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Atracciones");
+        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
+        var reply = await client.ListarReseniasAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapPost("/api/v1/atracciones/{guid:guid}/resenias", async (Guid guid, HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Atracciones");
+        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
+        var body = await ReadBodyAsync(context);
+        var reply = await client.CrearReseniaAsync(new JsonRequest
+        {
+            Json = WithAtraccionGuid(body, guid)
+        }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapPost("/api/v1/facturas", async (HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Facturacion");
+        var client = new FacturacionGrpc.FacturacionGrpcClient(channel);
+        var reply = await client.CrearFacturaAsync(new JsonRequest { Json = await ReadBodyAsync(context) }, cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapGet("/api/v1/facturas", async (HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Facturacion");
+        var client = new FacturacionGrpc.FacturacionGrpcClient(channel);
+        var reply = await client.ListarFacturasAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+
+    app.MapGet("/api/v1/datos-facturacion", async (HttpContext context, IConfiguration configuration) =>
+    {
+        using var channel = CreateGrpcChannel(configuration, "Facturacion");
+        var client = new FacturacionGrpc.FacturacionGrpcClient(channel);
+        var reply = await client.ListarDatosFacturacionAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
+        return FromGrpc(reply);
+    });
+}
 
 app.MapMethods(
     "/api/v1/{**path}",
