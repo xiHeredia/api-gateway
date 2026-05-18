@@ -14,11 +14,24 @@ builder.Services.AddHttpClient("proxy", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(60);
 });
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("FrontendCors", policy =>
+    {
+        policy
+            .WithOrigins(
+                "https://atracciones-front.onrender.com",
+                "http://localhost:5173"
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+    });
+});
 
 var app = builder.Build();
 
 app.UseAtraccionesApiDefaults();
-
+app.UseCors("FrontendCors");
 app.MapGet("/health", () => Results.Ok(new { status = "ok", service = "api-gateway" }));
 
 app.MapPost("/api/v1/auth/login", async (HttpContext context, IConfiguration configuration) =>
