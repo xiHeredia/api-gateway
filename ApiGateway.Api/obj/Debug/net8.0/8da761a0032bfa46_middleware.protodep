@@ -1,0 +1,2 @@
+obj\Debug\net8.0/Middleware.cs \
+obj\Debug\net8.0/MiddlewareGrpc.cs: ../protos/middleware.proto

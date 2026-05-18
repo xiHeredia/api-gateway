@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+option csharp_namespace = "Atracciones.Grpc";
+
+package atracciones.middleware.v1;
+
+message EmptyRequest {}
+
+message GuidRequest {
+  string guid = 1;
+}
+
+message JsonRequest {
+  string json = 1;
+}
+
+message AtraccionesListRequest {
+  string nombre = 1;
+  string destino_guid = 2;
+  string categoria_guid = 3;
+}
+
+message HorariosAtraccionRequest {
+  string atraccion_guid = 1;
+  bool disponibles = 2;
+}
+
+message HorarioTicketsRequest {
+  string atraccion_guid = 1;
+  string horario_guid = 2;
+}
+
+message JsonReply {
+  int32 status_code = 1;
+  string json = 2;
+}
+
+service IdentidadGrpc {
+  rpc Login(JsonRequest) returns (JsonReply);
+  rpc Register(JsonRequest) returns (JsonReply);
+}
+
+service ClientesGrpc {
+  rpc ObtenerPorUsuarioGuid(GuidRequest) returns (JsonReply);
+}
+
+service AtraccionesGrpc {
+  rpc ListarAtracciones(AtraccionesListRequest) returns (JsonReply);
+  rpc ObtenerFiltros(EmptyRequest) returns (JsonReply);
+  rpc ObtenerDetalle(GuidRequest) returns (JsonReply);
+  rpc ObtenerTickets(GuidRequest) returns (JsonReply);
+  rpc ObtenerHorariosAtraccion(HorariosAtraccionRequest) returns (JsonReply);
+  rpc ObtenerTicketsPorHorario(HorarioTicketsRequest) returns (JsonReply);
+  rpc ObtenerHorariosPorTicket(GuidRequest) returns (JsonReply);
+  rpc ListarResenias(GuidRequest) returns (JsonReply);
+  rpc CrearResenia(JsonRequest) returns (JsonReply);
+}
+
+service ReservasGrpc {
+  rpc Crear(JsonRequest) returns (JsonReply);
+  rpc Listar(EmptyRequest) returns (JsonReply);
+  rpc Obtener(GuidRequest) returns (JsonReply);
+  rpc ConfirmarPago(GuidRequest) returns (JsonReply);
+}
+
+service FacturacionGrpc {
+  rpc CrearFactura(JsonRequest) returns (JsonReply);
+  rpc ListarFacturas(EmptyRequest) returns (JsonReply);
+  rpc ListarDatosFacturacion(EmptyRequest) returns (JsonReply);
+}
