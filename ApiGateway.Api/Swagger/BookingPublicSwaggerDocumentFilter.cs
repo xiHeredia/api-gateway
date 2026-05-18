@@ -144,9 +144,21 @@ public class BookingPublicSwaggerDocumentFilter : IDocumentFilter
     private static OpenApiRequestBody RequestBody(params (string Name, object? Value)[] exampleValues)
     {
         var example = new OpenApiObject();
+        var schema = new OpenApiSchema
+        {
+            Type = "object",
+            Properties = new Dictionary<string, OpenApiSchema>(),
+            Required = new HashSet<string>()
+        };
 
         foreach (var (name, value) in exampleValues)
+        {
             example[name] = ToOpenApiAny(value);
+            schema.Properties[name] = ToOpenApiSchema(value);
+
+            if (value is not null)
+                schema.Required.Add(name);
+        }
 
         return new OpenApiRequestBody
         {
@@ -155,11 +167,54 @@ public class BookingPublicSwaggerDocumentFilter : IDocumentFilter
             {
                 ["application/json"] = new OpenApiMediaType
                 {
-                    Schema = AnyObjectSchema,
+                    Schema = schema,
                     Example = example
                 }
             }
         };
+    }
+
+    private static OpenApiSchema ToOpenApiSchema(object? value)
+    {
+        return value switch
+        {
+            null => new OpenApiSchema { Nullable = true },
+            string text when Guid.TryParse(text, out _) => new OpenApiSchema { Type = "string", Format = "uuid" },
+            string => new OpenApiSchema { Type = "string" },
+            int => new OpenApiSchema { Type = "integer", Format = "int32" },
+            decimal => new OpenApiSchema { Type = "number", Format = "decimal" },
+            bool => new OpenApiSchema { Type = "boolean" },
+            IEnumerable<string> => new OpenApiSchema
+            {
+                Type = "array",
+                Items = new OpenApiSchema { Type = "string" }
+            },
+            IEnumerable<Dictionary<string, object?>> dictionaries => new OpenApiSchema
+            {
+                Type = "array",
+                Items = ToObjectSchema(dictionaries.FirstOrDefault() ?? new Dictionary<string, object?>())
+            },
+            _ => new OpenApiSchema { Type = "string" }
+        };
+    }
+
+    private static OpenApiSchema ToObjectSchema(Dictionary<string, object?> values)
+    {
+        var schema = new OpenApiSchema
+        {
+            Type = "object",
+            Properties = new Dictionary<string, OpenApiSchema>(),
+            Required = new HashSet<string>()
+        };
+
+        foreach (var (name, value) in values)
+        {
+            schema.Properties[name] = ToOpenApiSchema(value);
+            if (value is not null)
+                schema.Required.Add(name);
+        }
+
+        return schema;
     }
 
     private static IOpenApiAny ToOpenApiAny(object? value)
