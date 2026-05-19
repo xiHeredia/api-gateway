@@ -14,6 +14,11 @@ message JsonRequest {
   string json = 1;
 }
 
+message GuidJsonRequest {
+  string guid = 1;
+  string json = 2;
+}
+
 message AtraccionesListRequest {
   string nombre = 1;
   string destino_guid = 2;
@@ -66,7 +71,7 @@ service ReservasGrpc {
   rpc Crear(JsonRequest) returns (JsonReply);
   rpc Listar(ListarReservasRequest) returns (JsonReply);
   rpc Obtener(GuidRequest) returns (JsonReply);
-  rpc ConfirmarPago(GuidRequest) returns (JsonReply);
+  rpc ConfirmarPago(GuidJsonRequest) returns (JsonReply);
 }
 
 service FacturacionGrpc {
