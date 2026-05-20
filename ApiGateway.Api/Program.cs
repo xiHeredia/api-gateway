@@ -43,7 +43,20 @@ var app = builder.Build();
 app.UseAtraccionesApiDefaults();
 app.UseCors("FrontendCors");
 
-app.MapGet("/health", () => Results.Ok(new { status = "ok", service = "api-gateway" }));
+app.MapGet("/health", (IConfiguration configuration) => Results.Ok(new
+{
+    service = "api-gateway",
+    status = "running",
+    auditLogging = configuration.GetValue("AuditLogging", true),
+    downstream = new
+    {
+        identidad = GetConfiguredServiceUrl(configuration, "Identidad"),
+        atracciones = GetConfiguredServiceUrl(configuration, "Atracciones"),
+        reservas = GetConfiguredServiceUrl(configuration, "Reservas"),
+        facturacion = GetConfiguredServiceUrl(configuration, "Facturacion"),
+        auditoria = GetConfiguredServiceUrl(configuration, "Auditoria")
+    }
+}));
 
 if (app.Configuration.GetValue("Gateway:UseGrpc", true))
 {
@@ -72,7 +85,6 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
     });
 
     app.MapGet("/api/v1/atracciones", ListarAtraccionesGrpcAsync);
-    app.MapGet("/api/v2/atracciones", ListarAtraccionesGrpcAsync);
     app.MapGet("/api/v1/booking/atracciones", ListarAtraccionesGrpcAsync);
 
     app.MapGet("/api/v1/atracciones/filtros", async (HttpContext context, IConfiguration configuration) =>
@@ -82,16 +94,8 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
         var reply = await client.ObtenerFiltrosAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
         return FromGrpc(reply);
     });
-    app.MapGet("/api/v2/atracciones/filtros", async (HttpContext context, IConfiguration configuration) =>
-    {
-        using var channel = CreateGrpcChannel(configuration, "Atracciones");
-        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-        var reply = await client.ObtenerFiltrosAsync(new EmptyRequest(), cancellationToken: context.RequestAborted);
-        return FromGrpc(reply);
-    });
 
     app.MapGet("/api/v1/atracciones/{guid:guid}", ObtenerAtraccionGrpcAsync);
-    app.MapGet("/api/v2/atracciones/{guid:guid}", ObtenerAtraccionGrpcAsync);
     app.MapGet("/api/v1/booking/atracciones/{guid:guid}", ObtenerAtraccionGrpcAsync);
 
     app.MapGet("/api/v1/atracciones/{guid:guid}/tickets", async (Guid guid, HttpContext context, IConfiguration configuration) =>
@@ -101,27 +105,8 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
         var reply = await client.ObtenerTicketsAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
         return FromGrpc(reply);
     });
-    app.MapGet("/api/v2/atracciones/{guid:guid}/tickets", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-    {
-        using var channel = CreateGrpcChannel(configuration, "Atracciones");
-        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-        var reply = await client.ObtenerTicketsAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
-        return FromGrpc(reply);
-    });
 
     app.MapGet("/api/v1/atracciones/{guid:guid}/horarios", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-    {
-        using var channel = CreateGrpcChannel(configuration, "Atracciones");
-        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-        var disponibles = bool.TryParse(context.Request.Query["disponibles"].ToString(), out var value) && value;
-        var reply = await client.ObtenerHorariosAtraccionAsync(new HorariosAtraccionRequest
-        {
-            AtraccionGuid = guid.ToString(),
-            Disponibles = disponibles
-        }, cancellationToken: context.RequestAborted);
-        return FromGrpc(reply);
-    });
-    app.MapGet("/api/v2/atracciones/{guid:guid}/horarios", async (Guid guid, HttpContext context, IConfiguration configuration) =>
     {
         using var channel = CreateGrpcChannel(configuration, "Atracciones");
         var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
@@ -149,21 +134,6 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
         }, cancellationToken: context.RequestAborted);
         return FromGrpc(reply);
     });
-    app.MapGet("/api/v2/atracciones/{guid:guid}/horarios/{horarioGuid:guid}/tickets", async (
-        Guid guid,
-        Guid horarioGuid,
-        HttpContext context,
-        IConfiguration configuration) =>
-    {
-        using var channel = CreateGrpcChannel(configuration, "Atracciones");
-        var client = new AtraccionesGrpc.AtraccionesGrpcClient(channel);
-        var reply = await client.ObtenerTicketsPorHorarioAsync(new HorarioTicketsRequest
-        {
-            AtraccionGuid = guid.ToString(),
-            HorarioGuid = horarioGuid.ToString()
-        }, cancellationToken: context.RequestAborted);
-        return FromGrpc(reply);
-    });
 
     app.MapGet("/api/v1/tickets/{guid:guid}/horarios", async (Guid guid, HttpContext context, IConfiguration configuration) =>
     {
@@ -174,23 +144,9 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
     });
 
     app.MapPost("/api/v1/reservas", CrearReservaGrpcAsync);
-    app.MapPost("/api/v2/reservas", CrearReservaGrpcAsync);
     app.MapPost("/api/v1/booking/reservas", CrearReservaGrpcAsync);
 
     app.MapGet("/api/v1/reservas", async (HttpContext context, IConfiguration configuration) =>
-    {
-        using var channel = CreateGrpcChannel(configuration, "Reservas");
-        var client = new ReservasGrpc.ReservasGrpcClient(channel);
-        var clienteGuid = GetClienteGuidFromToken(context);
-        var reply = await client.ListarAsync(new ListarReservasRequest
-        {
-            ClienteGuid = clienteGuid is not null && !IsStaff(context)
-                ? clienteGuid.Value.ToString()
-                : string.Empty
-        }, cancellationToken: context.RequestAborted);
-        return FromGrpc(reply);
-    });
-    app.MapGet("/api/v2/reservas", async (HttpContext context, IConfiguration configuration) =>
     {
         using var channel = CreateGrpcChannel(configuration, "Reservas");
         var client = new ReservasGrpc.ReservasGrpcClient(channel);
@@ -211,26 +167,8 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
         var reply = await client.ObtenerAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
         return FromGrpc(reply);
     });
-    app.MapGet("/api/v2/reservas/{guid:guid}", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-    {
-        using var channel = CreateGrpcChannel(configuration, "Reservas");
-        var client = new ReservasGrpc.ReservasGrpcClient(channel);
-        var reply = await client.ObtenerAsync(new GuidRequest { Guid = guid.ToString() }, cancellationToken: context.RequestAborted);
-        return FromGrpc(reply);
-    });
 
     app.MapPost("/api/v1/reservas/{guid:guid}/pagos/confirmacion", async (Guid guid, HttpContext context, IConfiguration configuration) =>
-    {
-        using var channel = CreateGrpcChannel(configuration, "Reservas");
-        var client = new ReservasGrpc.ReservasGrpcClient(channel);
-        var reply = await client.ConfirmarPagoAsync(new GuidJsonRequest
-        {
-            Guid = guid.ToString(),
-            Json = await ReadBodyAsync(context)
-        }, cancellationToken: context.RequestAborted);
-        return FromGrpc(reply);
-    });
-    app.MapPost("/api/v2/reservas/{guid:guid}/pagos/confirmacion", async (Guid guid, HttpContext context, IConfiguration configuration) =>
     {
         using var channel = CreateGrpcChannel(configuration, "Reservas");
         var client = new ReservasGrpc.ReservasGrpcClient(channel);
@@ -286,6 +224,8 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
         return FromGrpc(reply);
     });
 }
+
+app.MapBookingV2Endpoints();
 
 app.MapMethods(
     "/api/v1/{**path}",
@@ -417,6 +357,13 @@ static Guid? GetClienteGuidFromToken(HttpContext context)
 static bool IsStaff(HttpContext context)
 {
     return context.User.IsInRole("ADMIN") || context.User.IsInRole("OPERADOR");
+}
+
+static string GetConfiguredServiceUrl(IConfiguration configuration, string serviceKey)
+{
+    return configuration[$"ServiceUrls:{serviceKey}"]
+        ?? configuration[$"GrpcServiceUrls:{serviceKey}"]
+        ?? string.Empty;
 }
 
 static (string BaseUrl, string Path)? ResolveTarget(IConfiguration configuration, string path)
