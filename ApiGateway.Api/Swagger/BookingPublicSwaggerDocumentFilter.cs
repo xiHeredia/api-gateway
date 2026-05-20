@@ -77,7 +77,7 @@ public class BookingPublicSwaggerDocumentFilter : IDocumentFilter
                     ["telefono"] = "0991234567",
                     ["direccion"] = "Av. Principal 123"
                 })));
-        AddGet(swaggerDoc, "/api/v2/reservas", "Booking - Reservas", "Lista reservas del cliente autenticado.",
+        AddGet(swaggerDoc, "/api/v2/reservas", "Booking - Reservas", "Lista reservas creadas por el canal Booking. No requiere token.",
             Query("page", "integer", "Numero de pagina. Default: 1."),
             Query("limit", "integer", "Resultados por pagina. Default: 10."));
         AddGet(swaggerDoc, "/api/v2/reservas/{guid}", "Booking - Reservas", "Detalle de una reserva.", PathGuid("guid"));

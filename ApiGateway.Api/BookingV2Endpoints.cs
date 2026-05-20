@@ -37,22 +37,22 @@ public static class BookingV2Endpoints
 
         foreach (var item in allItems.OfType<JsonObject>())
         {
-            if (!MatchesGuidOrText(item, "destinoGuid", "destinoNombre", context.Request.Query["ciudad"].ToString()))
+            var contractItem = await ToAttractionListItemAsync(item, client, configuration, context.RequestAborted);
+            await EnrichAttractionListItemAsync(contractItem, client, configuration, context.RequestAborted);
+            if (!MatchesAttractionFilters(contractItem, context))
                 continue;
 
-            if (bool.TryParse(context.Request.Query["disponible"].ToString(), out var onlyAvailable) &&
-                onlyAvailable && !GetBool(item, "disponible"))
-                continue;
-
-            filtered.Add(item);
+            filtered.Add(contractItem);
         }
+
+        SortAttractions(filtered, context.Request.Query["ordenar_por"].ToString());
 
         var total = filtered.Count;
         var pageItems = filtered.Skip((page - 1) * limit).Take(limit).ToList();
 
         var data = new JsonArray();
         foreach (var item in pageItems)
-            data.Add(await ToAttractionListItemAsync(item, client, configuration, context.RequestAborted));
+            data.Add(Clone(item));
 
         var payload = Envelope(200, "Consulta exitosa", data);
         payload["pagination"] = Pagination(page, limit, total);
@@ -305,7 +305,7 @@ public static class BookingV2Endpoints
             ["tipo_nombre"] = "Atraccion",
             ["subtipo_tagname"] = null,
             ["subtipo_nombre"] = null,
-            ["etiquetas"] = new JsonArray(),
+            ["etiquetas"] = new JsonArray("free_cancellation", "skip_the_line"),
             ["descripcion_corta"] = Truncate(GetString(item, "descripcion"), 150),
             ["imagen_principal"] = GetString(item, "imagenUrl"),
             ["duracion_minutos"] = GetNullableInt(item, "duracionMinutos"),
@@ -315,8 +315,39 @@ public static class BookingV2Endpoints
             ["total_resenas"] = GetInt(item, "totalResenias", 0),
             ["idiomas_disponibles"] = new JsonArray("es"),
             ["disponibilidad"] = availability,
+            ["horarios_proximos"] = TransformHorarios(horarios),
             ["_links"] = new JsonObject { ["self"] = $"/api/v2/atracciones/{guid}" }
         };
+    }
+
+    private static async Task EnrichAttractionListItemAsync(JsonObject item, HttpClient client, IConfiguration configuration, CancellationToken cancellationToken)
+    {
+        var guid = GetString(item, "id");
+        if (string.IsNullOrWhiteSpace(guid))
+            return;
+
+        var detailResponse = await GetServiceJsonAsync(client, configuration, "Atracciones", $"/api/v1/atracciones/{guid}", cancellationToken);
+        if (!detailResponse.IsSuccess || detailResponse.Body?["data"] is not JsonObject detail)
+            return;
+
+        var categorias = detail["categorias"] as JsonArray ?? new JsonArray();
+        var categoriaItems = categorias.OfType<JsonObject>().ToList();
+        var firstCategoria = categoriaItems.FirstOrDefault();
+        var secondCategoria = categoriaItems.Skip(1).FirstOrDefault();
+
+        if (firstCategoria is not null)
+        {
+            item["tipo_tagname"] = Slug(GetString(firstCategoria, "nombre"));
+            item["tipo_nombre"] = GetString(firstCategoria, "nombre");
+        }
+
+        if (secondCategoria is not null)
+        {
+            item["subtipo_tagname"] = Slug(GetString(secondCategoria, "nombre"));
+            item["subtipo_nombre"] = GetString(secondCategoria, "nombre");
+        }
+
+        item["idiomas_disponibles"] = LanguageCodes(detail["idiomas"] as JsonArray);
     }
 
     private static async Task<JsonObject> ToAttractionDetailAsync(JsonObject detail, JsonArray horarios, HttpClient client, IConfiguration configuration, CancellationToken cancellationToken)
@@ -631,6 +662,108 @@ public static class BookingV2Endpoints
                string.Equals(Slug(GetString(item, textField)), Slug(value), StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool MatchesAttractionFilters(JsonObject item, HttpContext context)
+    {
+        if (!MatchesTextOrSlug(GetString(item, "ciudad"), context.Request.Query["ciudad"].ToString()))
+            return false;
+
+        if (!MatchesTextOrSlug(GetString(item, "tipo_tagname"), context.Request.Query["tipo"].ToString()) &&
+            !MatchesTextOrSlug(GetString(item, "tipo_nombre"), context.Request.Query["tipo"].ToString()))
+            return false;
+
+        if (!MatchesTextOrSlug(GetString(item, "subtipo_tagname"), context.Request.Query["subtipo"].ToString()) &&
+            !MatchesTextOrSlug(GetString(item, "subtipo_nombre"), context.Request.Query["subtipo"].ToString()))
+            return false;
+
+        if (!MatchesArrayValue(item["etiquetas"] as JsonArray, context.Request.Query["etiqueta"].ToString()))
+            return false;
+
+        if (!MatchesArrayValue(item["idiomas_disponibles"] as JsonArray, NormalizeLanguageQuery(context.Request.Query["idioma"].ToString())))
+            return false;
+
+        if (decimal.TryParse(context.Request.Query["calificacion_min"].ToString(), out var minRating) &&
+            GetDecimal(item, "calificacion", 0) < minRating)
+            return false;
+
+        if (bool.TryParse(context.Request.Query["disponible"].ToString(), out var available) &&
+            GetBoolValue(item["disponibilidad"] as JsonObject, "disponible") != available)
+            return false;
+
+        if (!MatchesScheduleRange(item["horarios_proximos"] as JsonArray, context.Request.Query["horario"].ToString()))
+            return false;
+
+        return true;
+    }
+
+    private static bool MatchesTextOrSlug(string? actual, string? expected)
+    {
+        if (string.IsNullOrWhiteSpace(expected))
+            return true;
+
+        if (string.IsNullOrWhiteSpace(actual))
+            return false;
+
+        var value = expected.Trim();
+        return actual.Contains(value, StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(Slug(actual), Slug(value), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesArrayValue(JsonArray? values, string? expected)
+    {
+        if (string.IsNullOrWhiteSpace(expected))
+            return true;
+
+        return (values ?? new JsonArray())
+            .Any(x => MatchesTextOrSlug(GetNodeString(x), expected));
+    }
+
+    private static bool MatchesScheduleRange(JsonArray? horarios, string? range)
+    {
+        if (string.IsNullOrWhiteSpace(range))
+            return true;
+
+        var parts = range.Split('-', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2 ||
+            !TimeOnly.TryParse(parts[0], out var start) ||
+            !TimeOnly.TryParse(parts[1], out var end))
+            return false;
+
+        return (horarios ?? new JsonArray())
+            .OfType<JsonObject>()
+            .Any(x =>
+            {
+                if (!TimeOnly.TryParse(GetString(x, "hora_inicio"), out var time))
+                    return false;
+
+                return start <= end
+                    ? time >= start && time < end
+                    : time >= start || time < end;
+            });
+    }
+
+    private static void SortAttractions(List<JsonObject> items, string? sorter)
+    {
+        var sorted = (sorter ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            "lowest_price" => items.OrderBy(x => GetDecimal(x, "precio_desde", decimal.MaxValue)).ThenBy(x => GetString(x, "nombre")),
+            "highest_price" => items.OrderByDescending(x => GetDecimal(x, "precio_desde", 0)).ThenBy(x => GetString(x, "nombre")),
+            "highest_weighted_rating" => items.OrderByDescending(x => GetDecimal(x, "calificacion", 0)).ThenByDescending(x => GetInt(x, "total_resenas", 0)),
+            _ => items.OrderByDescending(x => GetInt(x, "total_resenas", 0)).ThenByDescending(x => GetDecimal(x, "calificacion", 0))
+        };
+
+        var ordered = sorted.ToList();
+        items.Clear();
+        items.AddRange(ordered);
+    }
+
+    private static string? NormalizeLanguageQuery(string? language)
+    {
+        if (string.IsNullOrWhiteSpace(language))
+            return language;
+
+        return language.Length <= 3 ? language.Trim() : LanguageCode(language);
+    }
+
     private static bool TryReadPagination(HttpContext context, out int page, out int limit, out IResult error)
     {
         page = 1;
@@ -825,6 +958,21 @@ public static class BookingV2Endpoints
     private static bool GetBool(JsonObject obj, string name)
     {
         return bool.TryParse(GetString(obj, name), out var value) && value;
+    }
+
+    private static bool GetBoolValue(JsonObject? obj, string name)
+    {
+        return bool.TryParse(GetString(obj, name), out var value) && value;
+    }
+
+    private static string? GetNodeString(JsonNode? node)
+    {
+        if (node is null)
+            return null;
+
+        return node.GetValueKind() == JsonValueKind.String
+            ? node.GetValue<string>()
+            : node.ToJsonString().Trim('"');
     }
 
     private static int GetIntQuery(HttpContext context, string key, int fallback)
