@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -76,37 +77,26 @@ public static class BookingV2Endpoints
     private static async Task<IResult> ObtenerFiltrosAsync(HttpContext context, IHttpClientFactory httpClientFactory, IConfiguration configuration)
     {
         var client = httpClientFactory.CreateClient("proxy");
-        var filtersResponse = await GetServiceJsonAsync(client, configuration, "Atracciones", "/api/v1/atracciones/filtros", context.RequestAborted);
-        if (!filtersResponse.IsSuccess)
-            return filtersResponse.ToResult();
-
         var attractionsResponse = await GetServiceJsonAsync(client, configuration, "Atracciones", "/api/v1/atracciones", context.RequestAborted);
-        var attractions = attractionsResponse.IsSuccess ? DataArray(attractionsResponse.Body) : new JsonArray();
-        var data = filtersResponse.Body?["data"] as JsonObject ?? new JsonObject();
+        if (!attractionsResponse.IsSuccess)
+            return attractionsResponse.ToResult();
+
+        var attractions = new List<JsonObject>();
+        foreach (var item in DataArray(attractionsResponse.Body).OfType<JsonObject>())
+        {
+            var contractItem = await ToAttractionListItemAsync(item, client, configuration, context.RequestAborted);
+            await EnrichAttractionListItemAsync(contractItem, client, configuration, context.RequestAborted);
+            attractions.Add(contractItem);
+        }
 
         var payloadData = new JsonObject
         {
-            ["destinationFilters"] = BuildFilterArray(data["destinos"] as JsonArray, attractions, "destinoGuid", "destinoNombre", includeImage: true),
-            ["typeFilters"] = BuildFilterArray(data["categorias"] as JsonArray, attractions, null, null),
-            ["labelFilters"] = new JsonArray
-            {
-                new JsonObject { ["name"] = "Cancelacion gratuita", ["tagname"] = "free_cancellation", ["productCount"] = attractions.Count },
-                new JsonObject { ["name"] = "Sin fila", ["tagname"] = "skip_the_line", ["productCount"] = attractions.Count }
-            },
-            ["minRatingFilter"] = new JsonArray
-            {
-                new JsonObject { ["name"] = "3.0+", ["tagname"] = "3.0", ["productCount"] = attractions.Count },
-                new JsonObject { ["name"] = "3.5+", ["tagname"] = "3.5", ["productCount"] = attractions.Count },
-                new JsonObject { ["name"] = "4.0+", ["tagname"] = "4.0", ["productCount"] = attractions.Count },
-                new JsonObject { ["name"] = "4.5+", ["tagname"] = "4.5", ["productCount"] = attractions.Count }
-            },
-            ["timeOfDayFilters"] = new JsonArray
-            {
-                new JsonObject { ["name"] = "Manana (05:00-12:00)", ["tagname"] = "05:00-12:00", ["productCount"] = attractions.Count },
-                new JsonObject { ["name"] = "Tarde (12:00-18:00)", ["tagname"] = "12:00-18:00", ["productCount"] = attractions.Count },
-                new JsonObject { ["name"] = "Noche (18:00-05:00)", ["tagname"] = "18:00-05:00", ["productCount"] = attractions.Count }
-            },
-            ["supportedLanguageFilters"] = BuildLanguageFilters(data["idiomas"] as JsonArray, attractions.Count)
+            ["destinationFilters"] = BuildDestinationFilters(attractions),
+            ["typeFilters"] = BuildTypeFilters(attractions),
+            ["labelFilters"] = BuildLabelFilters(attractions),
+            ["minRatingFilter"] = BuildMinRatingFilters(attractions),
+            ["timeOfDayFilters"] = BuildTimeOfDayFilters(attractions),
+            ["supportedLanguageFilters"] = BuildSupportedLanguageFilters(attractions)
         };
 
         return Results.Json(Envelope(200, "Operacion exitosa", payloadData), statusCode: 200);
@@ -654,6 +644,156 @@ public static class BookingV2Endpoints
         };
     }
 
+    private static JsonArray BuildDestinationFilters(IEnumerable<JsonObject> attractions)
+    {
+        var result = new JsonArray();
+        foreach (var group in attractions
+            .Where(x => !string.IsNullOrWhiteSpace(GetString(x, "ciudad")))
+            .GroupBy(x => GetString(x, "ciudad")!, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x.Key))
+        {
+            result.Add(new JsonObject
+            {
+                ["name"] = group.Key,
+                ["tagname"] = Slug(group.Key),
+                ["productCount"] = group.Count(),
+                ["image"] = new JsonObject { ["url"] = null },
+                ["childFilterOptions"] = null
+            });
+        }
+
+        return result;
+    }
+
+    private static JsonArray BuildTypeFilters(IEnumerable<JsonObject> attractions)
+    {
+        var result = new JsonArray();
+        foreach (var group in attractions
+            .Select(x => new
+            {
+                Name = GetString(x, "tipo_nombre"),
+                Tagname = GetString(x, "tipo_tagname")
+            })
+            .Where(x => !string.IsNullOrWhiteSpace(x.Name))
+            .GroupBy(x => Slug(x.Tagname ?? x.Name), StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x.First().Name))
+        {
+            result.Add(new JsonObject
+            {
+                ["name"] = group.First().Name,
+                ["tagname"] = group.Key,
+                ["productCount"] = group.Count(),
+                ["childFilterOptions"] = null
+            });
+        }
+
+        return result;
+    }
+
+    private static JsonArray BuildLabelFilters(IReadOnlyCollection<JsonObject> attractions)
+    {
+        return new JsonArray
+        {
+            new JsonObject
+            {
+                ["name"] = "Cancelacion gratuita",
+                ["tagname"] = "free_cancellation",
+                ["productCount"] = CountByArrayValue(attractions, "etiquetas", "free_cancellation")
+            },
+            new JsonObject
+            {
+                ["name"] = "Sin fila",
+                ["tagname"] = "skip_the_line",
+                ["productCount"] = CountByArrayValue(attractions, "etiquetas", "skip_the_line")
+            }
+        };
+    }
+
+    private static JsonArray BuildMinRatingFilters(IReadOnlyCollection<JsonObject> attractions)
+    {
+        return new JsonArray
+        {
+            RatingFilter(attractions, "4.5+", "4.5", 4.5m),
+            RatingFilter(attractions, "4.0+", "4.0", 4.0m),
+            RatingFilter(attractions, "3.5+", "3.5", 3.5m),
+            RatingFilter(attractions, "3.0+", "3.0", 3.0m)
+        };
+    }
+
+    private static JsonObject RatingFilter(IEnumerable<JsonObject> attractions, string name, string tagname, decimal minimum)
+    {
+        return new JsonObject
+        {
+            ["name"] = name,
+            ["tagname"] = tagname,
+            ["productCount"] = attractions.Count(x => GetDecimal(x, "calificacion", 0) >= minimum)
+        };
+    }
+
+    private static JsonArray BuildTimeOfDayFilters(IReadOnlyCollection<JsonObject> attractions)
+    {
+        return new JsonArray
+        {
+            TimeOfDayFilter(attractions, "Manana (05:00-12:00)", "05:00-12:00"),
+            TimeOfDayFilter(attractions, "Tarde (12:00-18:00)", "12:00-18:00"),
+            TimeOfDayFilter(attractions, "Noche (18:00-05:00)", "18:00-05:00")
+        };
+    }
+
+    private static JsonObject TimeOfDayFilter(IEnumerable<JsonObject> attractions, string name, string tagname)
+    {
+        return new JsonObject
+        {
+            ["name"] = name,
+            ["tagname"] = tagname,
+            ["productCount"] = attractions.Count(x => MatchesScheduleRange(x["_horarios_proximos"] as JsonArray, tagname))
+        };
+    }
+
+    private static JsonArray BuildSupportedLanguageFilters(IReadOnlyCollection<JsonObject> attractions)
+    {
+        var knownNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["es"] = "Espanol",
+            ["en"] = "Ingles",
+            ["fr"] = "Frances",
+            ["pt"] = "Portugues",
+            ["de"] = "Aleman",
+            ["it"] = "Italiano"
+        };
+
+        var codes = attractions
+            .SelectMany(x => (x["idiomas_disponibles"] as JsonArray ?? new JsonArray()).Select(GetNodeString))
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => NormalizeLanguageQuery(x) ?? "es")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x.Equals("es", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(x => x)
+            .ToList();
+
+        if (codes.Count == 0)
+            codes.Add("es");
+
+        var result = new JsonArray();
+        foreach (var code in codes)
+        {
+            result.Add(new JsonObject
+            {
+                ["name"] = knownNames.TryGetValue(code, out var name) ? name : code,
+                ["tagname"] = code,
+                ["productCount"] = CountByArrayValue(attractions, "idiomas_disponibles", code)
+            });
+        }
+
+        return result;
+    }
+
+    private static int CountByArrayValue(IEnumerable<JsonObject> attractions, string field, string value)
+    {
+        return attractions.Count(x => (x[field] as JsonArray ?? new JsonArray())
+            .Any(item => string.Equals(GetNodeString(item), value, StringComparison.OrdinalIgnoreCase)));
+    }
+
     private static JsonArray BuildFilterArray(JsonArray? source, JsonArray attractions, string? guidField, string? nameField, bool includeImage = false)
     {
         var result = new JsonArray();
@@ -1061,7 +1201,13 @@ public static class BookingV2Endpoints
         if (string.IsNullOrWhiteSpace(value))
             return string.Empty;
 
-        var normalized = value.Trim().ToLowerInvariant()
+        var normalized = value.Trim()
+            .Normalize(NormalizationForm.FormD)
+            .Where(ch => CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
+            .Aggregate(new StringBuilder(), (builder, ch) => builder.Append(ch))
+            .ToString()
+            .Normalize(NormalizationForm.FormC)
+            .ToLowerInvariant()
             .Replace("á", "a")
             .Replace("é", "e")
             .Replace("í", "i")
