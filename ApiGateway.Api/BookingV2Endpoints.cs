@@ -52,7 +52,7 @@ public static class BookingV2Endpoints
 
         var data = new JsonArray();
         foreach (var item in pageItems)
-            data.Add(Clone(item));
+            data.Add(ToAttractionListContractItem(item));
 
         var payload = Envelope(200, "Consulta exitosa", data);
         payload["pagination"] = Pagination(page, limit, total);
@@ -68,7 +68,7 @@ public static class BookingV2Endpoints
             new JsonObject { ["name"] = "Mejor calificacion", ["value"] = "highest_weighted_rating" }
         };
         payload["defaultSorter"] = new JsonObject { ["name"] = "Mas populares", ["value"] = "trending" };
-        payload["_links"] = new JsonObject { ["self"] = $"/api/v2/atracciones?page={page}&limit={limit}" };
+        payload["_links"] = new JsonObject { ["self"] = SelfLink(context, page, limit) };
 
         return Results.Json(payload, statusCode: 200);
     }
@@ -244,6 +244,7 @@ public static class BookingV2Endpoints
 
         var payload = Envelope(200, "Operacion exitosa", data);
         payload["pagination"] = Pagination(page, limit, total);
+        payload["_links"] = new JsonObject { ["self"] = SelfLink(context, page, limit) };
         return Results.Json(payload, statusCode: 200);
     }
 
@@ -278,8 +279,8 @@ public static class BookingV2Endpoints
             ["rev_codigo"] = GetString(data, "rev_codigo") ?? GetString(data, "revCodigo"),
             ["total"] = GetDecimal(data, "total", 0),
             ["moneda"] = GetString(data, "moneda") ?? "USD",
-            ["fecha_emision"] = GetString(data, "fecha_emision") ?? GetString(data, "fechaEmision"),
-            ["estado"] = GetString(data, "estado") ?? "E",
+            ["fecha_emision"] = FormatUtcTimestamp(GetString(data, "fecha_emision") ?? GetString(data, "fechaEmision")),
+            ["estado"] = MapFacturaEstado(GetString(data, "estado")),
             ["nombre_receptor"] = GetString(data, "nombre_receptor") ?? GetString(data, "nombreReceptor"),
             ["correo_receptor"] = GetString(data, "correo_receptor") ?? GetString(data, "correoReceptor")
         };
@@ -295,6 +296,7 @@ public static class BookingV2Endpoints
             : await GetHorariosRawAsync(client, configuration, guid, cancellationToken);
         var availability = BuildAvailability(horarios, GetBool(item, "disponible"));
 
+        var totalResenias = GetInt(item, "totalResenias", 0);
         return new JsonObject
         {
             ["id"] = guid,
@@ -311,11 +313,11 @@ public static class BookingV2Endpoints
             ["duracion_minutos"] = GetNullableInt(item, "duracionMinutos"),
             ["precio_desde"] = GetDecimal(item, "precioReferencia", 0),
             ["moneda"] = "USD",
-            ["calificacion"] = 4.5,
-            ["total_resenas"] = GetInt(item, "totalResenias", 0),
+            ["calificacion"] = totalResenias > 0 ? 4.5 : 0,
+            ["total_resenas"] = totalResenias,
             ["idiomas_disponibles"] = new JsonArray("es"),
             ["disponibilidad"] = availability,
-            ["horarios_proximos"] = TransformHorarios(horarios),
+            ["_horarios_proximos"] = TransformHorarios(horarios),
             ["_links"] = new JsonObject { ["self"] = $"/api/v2/atracciones/{guid}" }
         };
     }
@@ -361,7 +363,7 @@ public static class BookingV2Endpoints
         baseItem["incluye_transporte"] = GetBool(detail, "incluyeTransporte");
         baseItem["incluye_acompaniante"] = GetBool(detail, "incluyeAcompaniante");
         baseItem["tickets"] = TransformTickets(detail["tickets"] as JsonArray ?? new JsonArray());
-        baseItem["horarios_proximos"] = TransformHorarios(horarios);
+        baseItem.Remove("_horarios_proximos");
 
         var categorias = detail["categorias"] as JsonArray ?? new JsonArray();
         var firstCategoria = categorias.OfType<JsonObject>().FirstOrDefault();
@@ -406,8 +408,8 @@ public static class BookingV2Endpoints
             {
                 ["hor_guid"] = GetString(first, "guid"),
                 ["fecha"] = GetString(first, "fecha"),
-                ["hora_inicio"] = GetString(first, "horaInicio"),
-                ["hora_fin"] = GetString(first, "horaFin"),
+                ["hora_inicio"] = FormatTime(GetString(first, "horaInicio")),
+                ["hora_fin"] = FormatTime(GetString(first, "horaFin")),
                 ["cupos"] = group.Sum(x => GetInt(x, "cuposDisponibles", 0))
             });
         }
@@ -425,15 +427,15 @@ public static class BookingV2Endpoints
             ["rev_guid"] = GetString(reserva, "guid"),
             ["rev_codigo"] = GetString(reserva, "codigo"),
             ["hor_fecha"] = context.Fecha,
-            ["hor_hora_inicio"] = context.HoraInicio,
-            ["hor_hora_fin"] = context.HoraFin,
+            ["hor_hora_inicio"] = FormatTime(context.HoraInicio),
+            ["hor_hora_fin"] = FormatTime(context.HoraFin),
             ["atraccion_nombre"] = context.AtraccionNombre,
             ["rev_subtotal"] = GetDecimal(reserva, "subtotal", 0),
             ["rev_valor_iva"] = GetDecimal(reserva, "valorIva", 0),
             ["rev_total"] = GetDecimal(reserva, "total", 0),
             ["moneda"] = "USD",
             ["rev_estado"] = MapReservaEstado(GetString(reserva, "estado")),
-            ["rev_fecha_reserva_utc"] = GetString(reserva, "fechaReservaUtc"),
+            ["rev_fecha_reserva_utc"] = FormatUtcTimestamp(GetString(reserva, "fechaReservaUtc")),
             ["detalle"] = detalles,
             ["_links"] = new JsonObject
             {
@@ -456,7 +458,7 @@ public static class BookingV2Endpoints
             ["rev_total"] = Clone(full["rev_total"]),
             ["moneda"] = "USD",
             ["rev_estado"] = Clone(full["rev_estado"]),
-            ["_links"] = Clone(full["_links"])
+            ["_links"] = new JsonObject { ["self"] = Clone((full["_links"] as JsonObject)?["self"]) }
         };
     }
 
@@ -479,6 +481,80 @@ public static class BookingV2Endpoints
         }
 
         return result;
+    }
+
+    private static JsonObject ToAttractionListContractItem(JsonObject item)
+    {
+        var publicItem = Clone(item)?.AsObject() ?? new JsonObject();
+        publicItem.Remove("_horarios_proximos");
+        return publicItem;
+    }
+
+    private static string SelfLink(HttpContext context, int? page = null, int? limit = null)
+    {
+        var queryParts = new List<string>();
+        foreach (var pair in context.Request.Query)
+        {
+            if (pair.Key.Equals("page", StringComparison.OrdinalIgnoreCase) ||
+                pair.Key.Equals("limit", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            foreach (var value in pair.Value)
+            {
+                queryParts.Add($"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(value ?? string.Empty)}");
+            }
+        }
+
+        if (page is not null)
+            queryParts.Add($"page={page.Value}");
+
+        if (limit is not null)
+            queryParts.Add($"limit={limit.Value}");
+
+        return queryParts.Count == 0
+            ? context.Request.Path.ToString()
+            : $"{context.Request.Path}?{string.Join('&', queryParts)}";
+    }
+
+    private static string? FormatTime(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return value;
+
+        if (TimeOnly.TryParse(value, out var time))
+            return time.ToString("HH:mm");
+
+        if (TimeSpan.TryParse(value, out var span))
+            return new TimeOnly(span.Hours, span.Minutes).ToString("HH:mm");
+
+        if (DateTime.TryParse(value, out var dateTime))
+            return dateTime.ToString("HH:mm");
+
+        return value.Length >= 5 ? value[..5] : value;
+    }
+
+    private static string? FormatUtcTimestamp(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return value;
+
+        if (DateTimeOffset.TryParse(value, out var offset))
+            return offset.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+
+        if (DateTime.TryParse(value, out var dateTime))
+            return DateTime.SpecifyKind(dateTime, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+
+        return value;
+    }
+
+    private static string MapFacturaEstado(string? estado)
+    {
+        return estado?.ToUpperInvariant() switch
+        {
+            "I" => "I",
+            "C" => "C",
+            _ => "A"
+        };
     }
 
     private static async Task<ReservaContext> ResolveReservaContextAsync(JsonObject reserva, HttpClient client, IConfiguration configuration, CancellationToken cancellationToken, string? atraccionGuid = null)
@@ -689,7 +765,7 @@ public static class BookingV2Endpoints
             GetBoolValue(item["disponibilidad"] as JsonObject, "disponible") != available)
             return false;
 
-        if (!MatchesScheduleRange(item["horarios_proximos"] as JsonArray, context.Request.Query["horario"].ToString()))
+        if (!MatchesScheduleRange(item["_horarios_proximos"] as JsonArray, context.Request.Query["horario"].ToString()))
             return false;
 
         return true;
