@@ -20,6 +20,8 @@ public static class BookingV2Endpoints
         app.MapPost("/api/v2/reservas", CrearReservaAsync);
         app.MapGet("/api/v2/reservas", ListarReservasAsync);
         app.MapGet("/api/v2/reservas/{guid:guid}", ObtenerReservaAsync);
+        app.MapPost("/api/v2/reservas/{guid:guid}/cancelar", CancelarReservaAsync);
+        app.MapPatch("/api/v2/reservas/{guid:guid}/cancelar", CancelarReservaAsync);
         app.MapPost("/api/v2/reservas/{guid:guid}/pagos/confirmacion", ConfirmarPagoAsync);
     }
 
@@ -271,6 +273,36 @@ public static class BookingV2Endpoints
 
         var data = await ToReservaContractAsync(reserva, client, configuration, context.RequestAborted);
         return Results.Json(Envelope(200, "Operacion exitosa", data), statusCode: 200);
+    }
+
+    private static async Task<IResult> CancelarReservaAsync(Guid guid, HttpContext context, IHttpClientFactory httpClientFactory, IConfiguration configuration)
+    {
+        var client = httpClientFactory.CreateClient("proxy");
+        var body = await ReadJsonObjectAsync(context);
+        if (string.IsNullOrWhiteSpace(GetString(body, "motivo")))
+            body["motivo"] = "Cancelacion solicitada desde API Booking v2.";
+
+        var reservaResponse = await GetServiceJsonAsync(client, configuration, "Reservas", $"/api/v1/reservas/{guid}", context.RequestAborted);
+        if (!reservaResponse.IsSuccess)
+            return reservaResponse.ToResult();
+
+        var reserva = reservaResponse.Body?["data"] as JsonObject ?? new JsonObject();
+        var atraccionGuid = await ResolveAtraccionGuidAsync(reserva, client, configuration, context.RequestAborted);
+        var horarioGuid = GetString(reserva, "horarioGuid");
+        var detalles = BuildMovimientoCuposDetalles(reserva["detalles"] as JsonArray);
+
+        var cancelResponse = await SendServiceJsonAsync(client, configuration, "Reservas", HttpMethod.Patch, $"/api/v1/reservas/{guid}/cancelar", body, context);
+        if (!cancelResponse.IsSuccess)
+            return cancelResponse.ToResult();
+
+        if (!string.IsNullOrWhiteSpace(atraccionGuid) && !string.IsNullOrWhiteSpace(horarioGuid) && detalles.Count > 0)
+            await TryLiberarCuposAsync(client, configuration, atraccionGuid, horarioGuid, detalles, context);
+
+        return Results.Json(Envelope(200, "Reserva cancelada", new JsonObject
+        {
+            ["rev_guid"] = guid.ToString(),
+            ["cupos_liberados"] = !string.IsNullOrWhiteSpace(atraccionGuid) && detalles.Count > 0
+        }), statusCode: 200);
     }
 
     private static async Task<IResult> ConfirmarPagoAsync(Guid guid, HttpContext context, IHttpClientFactory httpClientFactory, IConfiguration configuration)
@@ -652,6 +684,55 @@ public static class BookingV2Endpoints
         }
 
         return context;
+    }
+
+    private static async Task<string?> ResolveAtraccionGuidAsync(JsonObject reserva, HttpClient client, IConfiguration configuration, CancellationToken cancellationToken)
+    {
+        var detalles = reserva["detalles"] as JsonArray ?? new JsonArray();
+        var firstTicketGuid = detalles.OfType<JsonObject>().Select(x => GetString(x, "ticketGuid")).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+        if (string.IsNullOrWhiteSpace(firstTicketGuid))
+            return null;
+
+        var attractionsResponse = await GetServiceJsonAsync(client, configuration, "Atracciones", "/api/v1/atracciones", cancellationToken);
+        if (!attractionsResponse.IsSuccess)
+            return null;
+
+        foreach (var attraction in DataArray(attractionsResponse.Body).OfType<JsonObject>())
+        {
+            var guid = GetString(attraction, "guid");
+            if (string.IsNullOrWhiteSpace(guid))
+                continue;
+
+            var ticketsResponse = await GetServiceJsonAsync(client, configuration, "Atracciones", $"/api/v1/atracciones/{guid}/tickets", cancellationToken);
+            if (!ticketsResponse.IsSuccess)
+                continue;
+
+            if (DataArray(ticketsResponse.Body).OfType<JsonObject>()
+                .Any(x => string.Equals(GetString(x, "guid"), firstTicketGuid, StringComparison.OrdinalIgnoreCase)))
+                return guid;
+        }
+
+        return null;
+    }
+
+    private static JsonArray BuildMovimientoCuposDetalles(JsonArray? detalles)
+    {
+        var result = new JsonArray();
+        foreach (var detalle in (detalles ?? new JsonArray()).OfType<JsonObject>())
+        {
+            var ticketGuid = GetString(detalle, "ticketGuid");
+            var cantidad = GetInt(detalle, "cantidad", 0);
+            if (string.IsNullOrWhiteSpace(ticketGuid) || cantidad <= 0)
+                continue;
+
+            result.Add(new JsonObject
+            {
+                ["ticketGuid"] = ticketGuid,
+                ["cantidad"] = cantidad
+            });
+        }
+
+        return result;
     }
 
     private static async Task FillContextFromAttractionAsync(ReservaContext context, string atraccionGuid, JsonObject reserva, HttpClient client, IConfiguration configuration, CancellationToken cancellationToken)

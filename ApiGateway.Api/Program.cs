@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using ApiGateway.Api.Swagger;
 using Atracciones.Grpc;
@@ -227,6 +228,9 @@ if (app.Configuration.GetValue("Gateway:UseGrpc", true))
 
 app.MapBookingV2Endpoints();
 
+app.MapPost("/api/v1/reservas/{guid:guid}/cancelar", CancelarReservaConCuposAsync);
+app.MapPatch("/api/v1/reservas/{guid:guid}/cancelar", CancelarReservaConCuposAsync);
+
 app.MapMethods(
     "/api/v1/{**path}",
     new[] { "GET", "POST", "PUT", "PATCH", "DELETE" },
@@ -283,6 +287,47 @@ static async Task<IResult> ProxyAsync(HttpContext context, IHttpClientFactory ht
     return Results.Empty;
 }
 
+static async Task<IResult> CancelarReservaConCuposAsync(
+    Guid guid,
+    HttpContext context,
+    IHttpClientFactory httpClientFactory,
+    IConfiguration configuration)
+{
+    var client = httpClientFactory.CreateClient("proxy");
+    var body = await ReadJsonObjectAsync(context);
+    if (string.IsNullOrWhiteSpace(GetString(body, "motivo")))
+        body["motivo"] = "Cancelacion solicitada desde API Gateway.";
+
+    var reservaResponse = await GetServiceJsonAsync(
+        client,
+        configuration,
+        "Reservas",
+        $"/api/v1/reservas/{guid}",
+        context.RequestAborted);
+
+    if (!reservaResponse.IsSuccess)
+        return ToJsonResult(reservaResponse);
+
+    var reserva = reservaResponse.Body?["data"] as JsonObject ?? new JsonObject();
+
+    var cancelResponse = await SendServiceJsonAsync(
+        client,
+        configuration,
+        "Reservas",
+        HttpMethod.Patch,
+        $"/api/v1/reservas/{guid}/cancelar",
+        body,
+        context);
+
+    if (!cancelResponse.IsSuccess)
+        return ToJsonResult(cancelResponse);
+
+    if (ShouldReturnCupos(reserva))
+        await TryLiberarCuposReservaAsync(client, configuration, reserva, context);
+
+    return ToJsonResult(cancelResponse);
+}
+
 static async Task<IResult> ObtenerAtraccionGrpcAsync(Guid guid, HttpContext context, IConfiguration configuration)
 {
     using var channel = CreateGrpcChannel(configuration, "Atracciones");
@@ -325,6 +370,12 @@ static async Task<string> ReadBodyAsync(HttpContext context)
     return string.IsNullOrWhiteSpace(body) ? "{}" : body;
 }
 
+static async Task<JsonObject> ReadJsonObjectAsync(HttpContext context)
+{
+    var raw = await ReadBodyAsync(context);
+    return JsonNode.Parse(string.IsNullOrWhiteSpace(raw) ? "{}" : raw)?.AsObject() ?? new JsonObject();
+}
+
 static string WithAtraccionGuidAndUsuario(string body, Guid atraccionGuid, string usuarioCreacion)
 {
     var node = JsonNode.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body)?.AsObject() ?? new JsonObject();
@@ -357,6 +408,100 @@ static Guid? GetClienteGuidFromToken(HttpContext context)
 static bool IsStaff(HttpContext context)
 {
     return context.User.IsInRole("ADMIN") || context.User.IsInRole("OPERADOR");
+}
+
+static bool ShouldReturnCupos(JsonObject reserva)
+{
+    var origen = GetString(reserva, "origenCanal") ?? GetString(reserva, "origen_canal");
+    return string.Equals(origen, "BOOKING", StringComparison.OrdinalIgnoreCase);
+}
+
+static async Task TryLiberarCuposReservaAsync(
+    HttpClient client,
+    IConfiguration configuration,
+    JsonObject reserva,
+    HttpContext context)
+{
+    try
+    {
+        var horarioGuid = GetString(reserva, "horarioGuid") ?? GetString(reserva, "hor_guid");
+        var detalles = BuildMovimientoCuposDetalles(reserva["detalles"] as JsonArray);
+        if (string.IsNullOrWhiteSpace(horarioGuid) || detalles.Count == 0)
+            return;
+
+        var atraccionGuid = await ResolveAtraccionGuidForReservaAsync(client, configuration, reserva, context.RequestAborted);
+        if (string.IsNullOrWhiteSpace(atraccionGuid))
+            return;
+
+        var body = new JsonObject { ["detalles"] = Clone(detalles) };
+        await SendServiceJsonAsync(
+            client,
+            configuration,
+            "Atracciones",
+            HttpMethod.Post,
+            $"/api/v1/atracciones/{atraccionGuid}/horarios/{horarioGuid}/cupos/liberar",
+            body,
+            context);
+    }
+    catch
+    {
+    }
+}
+
+static JsonArray BuildMovimientoCuposDetalles(JsonArray? detalles)
+{
+    var result = new JsonArray();
+    foreach (var detalle in (detalles ?? new JsonArray()).OfType<JsonObject>())
+    {
+        var ticketGuid = GetString(detalle, "ticketGuid") ?? GetString(detalle, "tck_guid");
+        var cantidad = GetInt(detalle, "cantidad", 0);
+        if (string.IsNullOrWhiteSpace(ticketGuid) || cantidad <= 0)
+            continue;
+
+        result.Add(new JsonObject
+        {
+            ["ticketGuid"] = ticketGuid,
+            ["cantidad"] = cantidad
+        });
+    }
+
+    return result;
+}
+
+static async Task<string?> ResolveAtraccionGuidForReservaAsync(
+    HttpClient client,
+    IConfiguration configuration,
+    JsonObject reserva,
+    CancellationToken cancellationToken)
+{
+    var firstTicketGuid = (reserva["detalles"] as JsonArray ?? new JsonArray())
+        .OfType<JsonObject>()
+        .Select(x => GetString(x, "ticketGuid") ?? GetString(x, "tck_guid"))
+        .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+
+    if (string.IsNullOrWhiteSpace(firstTicketGuid))
+        return null;
+
+    var attractionsResponse = await GetServiceJsonAsync(client, configuration, "Atracciones", "/api/v1/atracciones", cancellationToken);
+    if (!attractionsResponse.IsSuccess)
+        return null;
+
+    foreach (var attraction in DataArray(attractionsResponse.Body).OfType<JsonObject>())
+    {
+        var atraccionGuid = GetString(attraction, "guid");
+        if (string.IsNullOrWhiteSpace(atraccionGuid))
+            continue;
+
+        var ticketsResponse = await GetServiceJsonAsync(client, configuration, "Atracciones", $"/api/v1/atracciones/{atraccionGuid}/tickets", cancellationToken);
+        if (!ticketsResponse.IsSuccess)
+            continue;
+
+        if (DataArray(ticketsResponse.Body).OfType<JsonObject>()
+            .Any(x => string.Equals(GetString(x, "guid"), firstTicketGuid, StringComparison.OrdinalIgnoreCase)))
+            return atraccionGuid;
+    }
+
+    return null;
 }
 
 static string GetConfiguredServiceUrl(IConfiguration configuration, string serviceKey)
@@ -408,6 +553,73 @@ static Uri BuildTargetUri(HttpContext context, string baseUrl, string forwardedP
     return new Uri($"{normalizedBaseUrl}/api/v1/{normalizedPath}{query}");
 }
 
+static async Task<ServiceJsonResponse> GetServiceJsonAsync(
+    HttpClient client,
+    IConfiguration configuration,
+    string serviceKey,
+    string path,
+    CancellationToken cancellationToken)
+{
+    var uri = new Uri($"{NormalizeServiceBaseUrl(GetConfiguredServiceUrl(configuration, serviceKey))}{path}");
+    using var response = await client.GetAsync(uri, cancellationToken);
+    return await ServiceJsonResponse.FromAsync(response, cancellationToken);
+}
+
+static async Task<ServiceJsonResponse> SendServiceJsonAsync(
+    HttpClient client,
+    IConfiguration configuration,
+    string serviceKey,
+    HttpMethod method,
+    string path,
+    JsonObject body,
+    HttpContext context)
+{
+    var uri = new Uri($"{NormalizeServiceBaseUrl(GetConfiguredServiceUrl(configuration, serviceKey))}{path}");
+    using var request = new HttpRequestMessage(method, uri)
+    {
+        Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json")
+    };
+
+    if (context.Request.Headers.TryGetValue("Authorization", out var authorization))
+        request.Headers.TryAddWithoutValidation("Authorization", authorization.ToArray());
+
+    using var response = await client.SendAsync(request, context.RequestAborted);
+    return await ServiceJsonResponse.FromAsync(response, context.RequestAborted);
+}
+
+static JsonArray DataArray(JsonObject? root)
+{
+    return root?["data"] as JsonArray ?? new JsonArray();
+}
+
+static JsonNode? Clone(JsonNode? node)
+{
+    return node is null ? null : JsonNode.Parse(node.ToJsonString());
+}
+
+static string? GetString(JsonObject? obj, string name)
+{
+    if (obj is null || obj[name] is null)
+        return null;
+
+    return obj[name]!.GetValueKind() == JsonValueKind.String
+        ? obj[name]!.GetValue<string>()
+        : obj[name]!.ToJsonString().Trim('"');
+}
+
+static int GetInt(JsonObject? obj, string name, int fallback)
+{
+    if (obj is null || obj[name] is null)
+        return fallback;
+
+    return int.TryParse(GetString(obj, name), out var value) ? value : fallback;
+}
+
+static IResult ToJsonResult(ServiceJsonResponse response)
+{
+    return Results.Content(response.Raw, "application/json", Encoding.UTF8, response.StatusCode);
+}
+
 static string NormalizeServiceBaseUrl(string baseUrl)
 {
     var normalized = baseUrl.Trim().TrimEnd('/');
@@ -447,4 +659,27 @@ static void CopyResponseHeaders(HttpContext context, HttpResponseMessage respons
         context.Response.Headers[header.Key] = header.Value.ToArray();
 
     context.Response.Headers.Remove("transfer-encoding");
+}
+
+sealed class ServiceJsonResponse
+{
+    public int StatusCode { get; init; }
+    public JsonObject? Body { get; init; }
+    public string Raw { get; init; } = "{}";
+    public bool IsSuccess => StatusCode is >= 200 and <= 299;
+
+    public static async Task<ServiceJsonResponse> FromAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        var raw = await response.Content.ReadAsStringAsync(cancellationToken);
+        JsonObject? body = null;
+        if (!string.IsNullOrWhiteSpace(raw))
+            body = JsonNode.Parse(raw) as JsonObject;
+
+        return new ServiceJsonResponse
+        {
+            StatusCode = (int)response.StatusCode,
+            Body = body,
+            Raw = string.IsNullOrWhiteSpace(raw) ? "{}" : raw
+        };
+    }
 }
