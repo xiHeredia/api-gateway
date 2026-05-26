@@ -202,9 +202,29 @@ public static class BookingV2Endpoints
         if (body["clienteGuid"] is not null || body["cliente_guid"] is not null)
             internalBody["clienteGuid"] = Clone(body["clienteGuid"] ?? body["cliente_guid"]);
 
+        var movimientoCuposBody = new JsonObject
+        {
+            ["detalles"] = Clone(detalles)
+        };
+
+        var cuposResponse = await SendServiceJsonAsync(
+            client,
+            configuration,
+            "Atracciones",
+            HttpMethod.Post,
+            $"/api/v1/atracciones/{atraccionGuid}/horarios/{horarioGuid}/cupos/descontar",
+            movimientoCuposBody,
+            context);
+
+        if (!cuposResponse.IsSuccess)
+            return cuposResponse.ToResult();
+
         var response = await SendServiceJsonAsync(client, configuration, "Reservas", HttpMethod.Post, "/api/v1/reservas", internalBody, context);
         if (!response.IsSuccess)
+        {
+            await TryLiberarCuposAsync(client, configuration, atraccionGuid, horarioGuid, detalles, context);
             return response.ToResult();
+        }
 
         var reserva = response.Body?["data"] as JsonObject ?? new JsonObject();
         var data = await ToReservaContractAsync(reserva, client, configuration, context.RequestAborted, atraccionGuid);
@@ -377,7 +397,9 @@ public static class BookingV2Endpoints
                 ["tck_guid"] = GetString(ticket, "guid"),
                 ["tipo"] = GetString(ticket, "tipoParticipante") ?? GetString(ticket, "titulo"),
                 ["precio"] = GetDecimal(ticket, "precio", 0),
-                ["moneda"] = "USD"
+                ["moneda"] = "USD",
+                ["cupos_disponibles"] = GetInt(ticket, "cuposDisponibles", 0),
+                ["capacidad_maxima"] = GetInt(ticket, "capacidadMaxima", 0)
             });
         }
 
@@ -1068,6 +1090,35 @@ public static class BookingV2Endpoints
 
         using var response = await client.SendAsync(request, context.RequestAborted);
         return await ServiceJsonResponse.FromAsync(response, context.RequestAborted);
+    }
+
+    private static async Task TryLiberarCuposAsync(
+        HttpClient client,
+        IConfiguration configuration,
+        string atraccionGuid,
+        string horarioGuid,
+        JsonArray detalles,
+        HttpContext context)
+    {
+        try
+        {
+            var body = new JsonObject
+            {
+                ["detalles"] = Clone(detalles)
+            };
+
+            await SendServiceJsonAsync(
+                client,
+                configuration,
+                "Atracciones",
+                HttpMethod.Post,
+                $"/api/v1/atracciones/{atraccionGuid}/horarios/{horarioGuid}/cupos/liberar",
+                body,
+                context);
+        }
+        catch
+        {
+        }
     }
 
     private static string GetServiceBaseUrl(IConfiguration configuration, string serviceKey)
