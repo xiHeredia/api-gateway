@@ -282,17 +282,24 @@ public static class BookingV2Endpoints
             return response.ToResult();
 
         var data = response.Body?["data"] as JsonObject ?? new JsonObject();
+        var facturaBody = BuildFacturaBody(guid, body, data);
+        var facturaResponse = await SendServiceJsonAsync(client, configuration, "Facturacion", HttpMethod.Post, "/api/v1/facturas", facturaBody, context);
+        if (!facturaResponse.IsSuccess)
+            return facturaResponse.ToResult();
+
+        var factura = facturaResponse.Body?["data"] as JsonObject ?? new JsonObject();
+        var datosFacturacion = factura["datosFacturacion"] as JsonObject ?? new JsonObject();
         var contractData = new JsonObject
         {
-            ["fac_guid"] = GetString(data, "fac_guid") ?? GetString(data, "facGuid"),
-            ["fac_numero"] = GetString(data, "fac_numero") ?? GetString(data, "facNumero"),
+            ["fac_guid"] = GetString(factura, "guid"),
+            ["fac_numero"] = GetString(factura, "numero"),
             ["rev_codigo"] = GetString(data, "rev_codigo") ?? GetString(data, "revCodigo"),
-            ["total"] = GetDecimal(data, "total", 0),
+            ["total"] = GetDecimal(factura, "total", GetDecimal(data, "total", 0)),
             ["moneda"] = GetString(data, "moneda") ?? "USD",
-            ["fecha_emision"] = FormatUtcTimestamp(GetString(data, "fecha_emision") ?? GetString(data, "fechaEmision")),
-            ["estado"] = MapFacturaEstado(GetString(data, "estado")),
-            ["nombre_receptor"] = GetString(data, "nombre_receptor") ?? GetString(data, "nombreReceptor"),
-            ["correo_receptor"] = GetString(data, "correo_receptor") ?? GetString(data, "correoReceptor")
+            ["fecha_emision"] = FormatUtcTimestamp(GetString(factura, "fechaEmision")),
+            ["estado"] = MapFacturaEstado(GetString(factura, "estado")),
+            ["nombre_receptor"] = GetString(datosFacturacion, "nombre") ?? GetString(data, "nombre_receptor") ?? GetString(data, "nombreReceptor"),
+            ["correo_receptor"] = GetString(datosFacturacion, "correo") ?? GetString(data, "correo_receptor") ?? GetString(data, "correoReceptor")
         };
 
         return Results.Json(Envelope(201, "Operacion exitosa", contractData), statusCode: 201);
@@ -493,6 +500,43 @@ public static class BookingV2Endpoints
         }
 
         return result;
+    }
+
+    private static JsonObject BuildFacturaBody(Guid reservaGuid, JsonObject requestBody, JsonObject pagoData)
+    {
+        var nombre = GetString(requestBody, "nombre_receptor") ??
+                     GetString(requestBody, "nombreReceptor") ??
+                     GetString(pagoData, "nombre_receptor") ??
+                     GetString(pagoData, "nombreReceptor") ??
+                     "Consumidor";
+
+        var apellido = GetString(requestBody, "apellido_receptor") ??
+                       GetString(requestBody, "apellidoReceptor");
+
+        var correo = GetString(requestBody, "correo_receptor") ??
+                     GetString(requestBody, "correoReceptor") ??
+                     GetString(pagoData, "correo_receptor") ??
+                     GetString(pagoData, "correoReceptor") ??
+                     "sin-correo@booking.local";
+
+        var telefono = GetString(requestBody, "telefono_receptor") ??
+                       GetString(requestBody, "telefonoReceptor");
+
+        return new JsonObject
+        {
+            ["reservaGuid"] = reservaGuid.ToString(),
+            ["numero"] = GetString(pagoData, "fac_numero") ?? GetString(pagoData, "facNumero"),
+            ["total"] = GetDecimal(pagoData, "total", 0),
+            ["observacion"] = GetString(requestBody, "observacion"),
+            ["origenCanal"] = "BOOKING",
+            ["datosFacturacion"] = new JsonObject
+            {
+                ["nombre"] = nombre,
+                ["apellido"] = apellido,
+                ["correo"] = correo,
+                ["telefono"] = telefono
+            }
+        };
     }
 
     private static JsonObject ToAttractionListContractItem(JsonObject item)
