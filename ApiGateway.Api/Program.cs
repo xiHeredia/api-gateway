@@ -3,10 +3,12 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using ApiGateway.Api.GraphQL;
 using ApiGateway.Api.Swagger;
 using Atracciones.Grpc;
 using Atracciones.Shared.Extensions;
 using Grpc.Net.Client;
+using HotChocolate.Types;
 using System.IdentityModel.Tokens.Jwt;
 using Swashbuckle.AspNetCore.SwaggerGen;
 
@@ -24,6 +26,13 @@ builder.Services.AddHttpClient("proxy", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(60);
 });
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<GraphQLGatewayProxy>();
+builder.Services
+    .AddGraphQLServer()
+    .BindRuntimeType<JsonElement, AnyType>()
+    .AddQueryType<BookingQuery>()
+    .AddMutationType<BookingMutation>();
 
 builder.Services.AddCors(options =>
 {
@@ -43,6 +52,7 @@ var app = builder.Build();
 
 app.UseAtraccionesApiDefaults();
 app.UseCors("FrontendCors");
+app.MapGraphQL("/graphql");
 
 app.MapGet("/health", (IConfiguration configuration) => Results.Ok(new
 {

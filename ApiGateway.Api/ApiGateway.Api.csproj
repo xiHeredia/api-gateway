@@ -4,6 +4,7 @@
     <PackageReference Include="Grpc.Net.Client" Version="2.63.0" />
     <PackageReference Include="Grpc.Tools" Version="2.63.0" PrivateAssets="All" />
     <PackageReference Include="Google.Protobuf" Version="3.27.1" />
+    <PackageReference Include="HotChocolate.AspNetCore" Version="13.9.14" />
   </ItemGroup>
 
   <ItemGroup>
