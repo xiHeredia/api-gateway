@@ -6,7 +6,6 @@ namespace ApiGateway.Api.GraphQL;
 
 public class GraphQLGatewayProxy
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IHttpContextAccessor _httpContextAccessor;
 
@@ -16,7 +15,7 @@ public class GraphQLGatewayProxy
         _httpContextAccessor = httpContextAccessor;
     }
 
-    public async Task<JsonElement> GetAsync(string path, IReadOnlyDictionary<string, object?>? query, CancellationToken cancellationToken)
+    public async Task<object?> GetAsync(string path, IReadOnlyDictionary<string, object?>? query, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, BuildUri(path, query));
         CopyAuthorization(request);
@@ -27,7 +26,7 @@ public class GraphQLGatewayProxy
         return await ReadJsonAsync(response, cancellationToken);
     }
 
-    public async Task<JsonElement> PostAsync(string path, JsonElement input, CancellationToken cancellationToken)
+    public async Task<object?> PostAsync(string path, JsonElement input, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(path, null));
         CopyAuthorization(request);
@@ -39,7 +38,7 @@ public class GraphQLGatewayProxy
         return await ReadJsonAsync(response, cancellationToken);
     }
 
-    public async Task<JsonElement> PatchAsync(string path, JsonElement input, CancellationToken cancellationToken)
+    public async Task<object?> PatchAsync(string path, JsonElement input, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Patch, BuildUri(path, null));
         CopyAuthorization(request);
@@ -78,25 +77,41 @@ public class GraphQLGatewayProxy
             request.Headers.TryAddWithoutValidation("Authorization", authorization);
     }
 
-    private static async Task<JsonElement> ReadJsonAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    private static async Task<object?> ReadJsonAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         var raw = await response.Content.ReadAsStringAsync(cancellationToken);
         if (string.IsNullOrWhiteSpace(raw))
             raw = "{}";
 
         using var document = JsonDocument.Parse(raw);
-        var root = document.RootElement.Clone();
         if (response.IsSuccessStatusCode)
-            return root;
+            return ToGraphQlValue(document.RootElement);
 
-        var error = new JsonObject
+        return new Dictionary<string, object?>
         {
             ["status"] = (int)response.StatusCode,
             ["message"] = "Error devuelto por el API Gateway REST.",
-            ["data"] = JsonNode.Parse(raw)
+            ["data"] = ToGraphQlValue(document.RootElement)
         };
+    }
 
-        using var errorDocument = JsonDocument.Parse(error.ToJsonString(JsonOptions));
-        return errorDocument.RootElement.Clone();
+    private static object? ToGraphQlValue(JsonElement element)
+    {
+        return element.ValueKind switch
+        {
+            JsonValueKind.Object => element.EnumerateObject()
+                .ToDictionary(property => property.Name, property => ToGraphQlValue(property.Value)),
+            JsonValueKind.Array => element.EnumerateArray()
+                .Select(ToGraphQlValue)
+                .ToList(),
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number when element.TryGetInt64(out var longValue) => longValue,
+            JsonValueKind.Number when element.TryGetDecimal(out var decimalValue) => decimalValue,
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Null => null,
+            JsonValueKind.Undefined => null,
+            _ => element.ToString()
+        };
     }
 }

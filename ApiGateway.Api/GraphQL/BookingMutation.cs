@@ -6,7 +6,8 @@ namespace ApiGateway.Api.GraphQL;
 public class BookingMutation
 {
     [GraphQLDescription("Crea una reserva pendiente usando el contrato Booking v2.")]
-    public Task<JsonElement> CrearReserva(
+    [GraphQLType(typeof(AnyType))]
+    public Task<object?> CrearReserva(
         [GraphQLType(typeof(AnyType))] JsonElement input,
         [Service] GraphQLGatewayProxy proxy,
         CancellationToken cancellationToken)
@@ -15,7 +16,8 @@ public class BookingMutation
     }
 
     [GraphQLDescription("Confirma pago y emite factura para una reserva.")]
-    public Task<JsonElement> ConfirmarPagoReserva(
+    [GraphQLType(typeof(AnyType))]
+    public Task<object?> ConfirmarPagoReserva(
         Guid guid,
         [GraphQLType(typeof(AnyType))] JsonElement input,
         [Service] GraphQLGatewayProxy proxy,
@@ -25,7 +27,8 @@ public class BookingMutation
     }
 
     [GraphQLDescription("Cancela una reserva.")]
-    public Task<JsonElement> CancelarReserva(
+    [GraphQLType(typeof(AnyType))]
+    public Task<object?> CancelarReserva(
         Guid guid,
         [GraphQLType(typeof(AnyType))] JsonElement input,
         [Service] GraphQLGatewayProxy proxy,
